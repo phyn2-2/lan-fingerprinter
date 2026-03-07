@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Data & logs (big or sensitive)
+data/*.db
+data/oui.csv
+logs/
+*.log
+
+# Misc
+.DS_Store
+*.swp
+*.swo

@@ -1,5 +1,5 @@
 from scapy.all import sniff, ARP, IP, get_if_hwaddr
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 from queue import Queue
 from .models import Device
