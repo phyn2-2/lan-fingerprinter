@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 from datetime import datetime
+from typing import Optional
 from .models import Device
 
 
@@ -22,25 +23,42 @@ class Database:
                         os_guess TEXT,
                         device_type TEXT,
                         first_seen TEXT,
-                        last_seen TEXT
+                        last_seen TEXT,
+                        ttl INTEGER          -- Phase 1.5: extracted from ICMP echo reply IP header
                     )
                 """)
 
     def update_or_insert_device(self, ip: str, mac: str, vendor: str = "Unknown",
-                                os_guess: str = "Unknown", device_type: str = "Unknown"):
+                                os_guess: str = "Unknown", device_type: str = "Unknown",
+                                ttl: Optional[int] = None):   # Phase 1.5: ttl param added
         now_iso = datetime.utcnow().isoformat()
         with self._lock:
             with self.conn:
                 self.conn.execute("""
-                    INSERT INTO devices (ip, mac, vendor, os_guess, device_type, first_seen, last_seen)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO devices (ip, mac, vendor, os_guess, device_type, first_seen, last_seen, ttl)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(ip) DO UPDATE SET
                         mac         = excluded.mac,
                         vendor      = excluded.vendor,
                         os_guess    = excluded.os_guess,
                         device_type = excluded.device_type,
-                        last_seen   = excluded.last_seen
-                """, (ip, mac, vendor, os_guess, device_type, now_iso, now_iso))
+                        last_seen   = excluded.last_seen,
+                        ttl         = CASE
+                                        WHEN excluded.ttl IS NOT NULL THEN excluded.ttl
+                                        ELSE devices.ttl
+                                      END
+                """, (ip, mac, vendor, os_guess, device_type, now_iso, now_iso, ttl))
+
+    def update_ttl(self, ip: str, ttl: int):
+        """Phase 1.5: Lightweight update — only write TTL for an existing device."""
+        now_iso = datetime.utcnow().isoformat()
+        with self._lock:
+            with self.conn:
+                self.conn.execute("""
+                    UPDATE devices
+                    SET ttl = ?, last_seen = ?
+                    WHERE ip = ?
+                """, (ttl, now_iso, ip))
 
     def get_all_devices(self) -> list[Device]:
         with self._lock:
@@ -56,7 +74,8 @@ class Database:
                 os_guess=row[3],
                 device_type=row[4],
                 first_seen=datetime.fromisoformat(row[5]) if row[5] else None,
-                last_seen=datetime.fromisoformat(row[6]) if row[6] else None
+                last_seen=datetime.fromisoformat(row[6]) if row[6] else None,
+                ttl=row[7] if len(row) > 7 else None   # Phase 1.5: read ttl column
             )
             devices.append(d)
         return devices
