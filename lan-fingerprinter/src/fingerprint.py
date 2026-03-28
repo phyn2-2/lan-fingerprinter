@@ -3,9 +3,11 @@ src/fingerprint.py — Device identification logic
 Phase 1:   MAC OUI → vendor name
 Phase 1.5: TTL → OS guess
 Phase 2:   hostname + vendor_class → improved OS + device type
+Phase 3:   DNS domain patterns → OS confirmation + device type refinement
 """
 
 from typing import Optional
+from .dns import classify_os_from_domain            # Phase 3
 
 
 def get_vendor(mac: str, oui_db: dict) -> str:
@@ -38,30 +40,48 @@ def guess_os_from_ttl(ttl: Optional[int]) -> str:
 
 def guess_os_from_dhcp(hostname: str, vendor_class: str) -> Optional[str]:
     """
-    Phase 2: DHCP-based OS fingerprinting.
-    Returns an OS string if a strong signal is found, else None
-    (caller should fall back to TTL-based guess).
+    DHCP-based OS fingerprinting (Phase 2).
+    Returns an OS string if a strong signal is found, else None.
     """
     hn = hostname.lower()
     vc = vendor_class.lower()
 
-    # Android
     if hn.startswith("android") or "android" in vc:
         return "Android"
-
-    # Windows — DHCP vendor class is consistently "MSFT 5.0"
     if "msft" in vc or hn.startswith("desktop-") or hn.startswith("win"):
         return "Windows"
-
-    # Apple — iOS/macOS use "dhcpcd" or blank hostname; vendor class signals
     if "apple" in vc or "iphone" in hn or "ipad" in hn or "macbook" in hn:
         return "Apple (iOS / macOS)"
-
-    # Linux embedded / OpenWRT routers
     if "linux" in vc or "openwrt" in vc or "ddwrt" in vc:
         return "Linux (embedded)"
-
     return None
+
+
+def resolve_os_guess(
+    ttl: Optional[int],
+    hostname: str,
+    vendor_class: str,
+    last_dns_domain: str,
+) -> str:
+    """
+    Phase 3: Multi-signal OS resolution with priority chain:
+      1. DHCP (strongest — device explicitly announces itself)
+      2. DNS domain patterns (high confidence for known platforms)
+      3. TTL (fallback — indirect, affected by hop count)
+    """
+    # Priority 1: DHCP
+    dhcp_os = guess_os_from_dhcp(hostname, vendor_class)
+    if dhcp_os:
+        return dhcp_os
+
+    # Priority 2: DNS domain (Phase 3)
+    if last_dns_domain:
+        dns_os = classify_os_from_domain(last_dns_domain)
+        if dns_os:
+            return dns_os
+
+    # Priority 3: TTL fallback
+    return guess_os_from_ttl(ttl)
 
 
 def guess_type_from_all_signals(
@@ -69,17 +89,19 @@ def guess_type_from_all_signals(
     vendor: str,
     hostname: str,
     vendor_class: str,
+    last_dns_domain: str = "",   # Phase 3
 ) -> str:
     """
-    Phase 2: Combined device type inference using TTL OS guess,
-    MAC vendor, DHCP hostname, and DHCP vendor class.
+    Combined device type inference using all available signals:
+    MAC vendor, TTL OS guess, DHCP hostname + vendor class, DNS domain.
     """
     hn = hostname.lower()
     vc = vendor_class.lower()
+    dns = last_dns_domain.lower()
     os_u = os_guess.upper()
     vendor_u = vendor.upper()
 
-    # --- Router / AP detection ---
+    # ── Router / AP ──────────────────────────────────────────────────────────
     router_vendors = [
         "TENDA", "TP-LINK", "HUAWEI", "CISCO", "MIKROTIK",
         "UBIQUITI", "ASUS", "NETGEAR", "DLINK", "ZYXEL", "CYBERTAN",
@@ -91,21 +113,34 @@ def guess_type_from_all_signals(
     if "ROUTER" in os_u or "TTL 255" in os_u or "CISCO" in os_u:
         return "Router / IoT"
 
-    # --- Android phone ---
-    if hn.startswith("android") or "SM-" in hostname or "android" in vc:
+    # ── Android (DHCP hostname, DNS, or vendor) ───────────────────────────────
+    if (hn.startswith("android") or "SM-" in hostname
+            or "android" in vc
+            or "gstatic.com" in dns
+            or "googleapis" in dns):
         return "Android Phone"
 
-    # --- Windows PC ---
-    if hn.startswith("desktop-") or hn.startswith("win") or "WINDOWS" in os_u or "MSFT" in vc.upper():
-        return "Windows PC"
-
-    # --- Apple device ---
+    # ── iOS / macOS (DHCP hostname or DNS) ───────────────────────────────────
     if "iphone" in hn or "ipad" in hn:
         return "iPhone / iPad"
     if "macbook" in hn or "imac" in hn:
         return "Mac"
+    if "captive.apple" in dns or ("apple.com" in dns and "iphone" not in hn):
+        return "Apple Device"
 
-    # --- Mobile (generic, by vendor) ---
+    # ── Windows PC (DHCP hostname, vendor class, or DNS) ─────────────────────
+    if (hn.startswith("desktop-") or hn.startswith("win")
+            or "MSFT" in vc.upper()
+            or "WINDOWS" in os_u
+            or "microsoft.com" in dns
+            or "windowsupdate" in dns):
+        return "Windows PC"
+
+    # ── Linux desktop (DNS signals) ───────────────────────────────────────────
+    if any(s in dns for s in ("ubuntu.com", "debian.org", "archlinux.org")):
+        return "Linux PC"
+
+    # ── Mobile (generic vendor) ───────────────────────────────────────────────
     mobile_vendors = ["SAMSUNG", "XIAOMI", "OPPO", "VIVO", "ONEPLUS",
                       "REALME", "TECNO", "INFINIX"]
     if any(v in vendor_u for v in mobile_vendors):
@@ -113,7 +148,7 @@ def guess_type_from_all_signals(
     if "ANDROID" in os_u:
         return "Mobile"
 
-    # --- PC / Laptop by known NIC vendors ---
+    # ── PC / Laptop by NIC vendor ─────────────────────────────────────────────
     pc_vendors = ["INTEL", "DELL", "HP", "LENOVO", "APPLE", "ACER"]
     if any(v in vendor_u for v in pc_vendors):
         if "WINDOWS" in os_u:
@@ -122,7 +157,7 @@ def guess_type_from_all_signals(
             return "Linux / Mac"
         return "PC / Laptop"
 
-    # --- Raspberry Pi / SBC ---
+    # ── Raspberry Pi / SBC ────────────────────────────────────────────────────
     if "RASPBERRY" in vendor_u:
         return "SBC (Pi)"
 
