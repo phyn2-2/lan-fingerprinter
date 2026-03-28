@@ -1,4 +1,4 @@
-interface: wlan0      # change to your interface (run ip link)
+interface: wlan2      # change to your interface (run ip link)
 db_path: data/devices.db
 update_interval: 2    # seconds for live table
 dhcp_enabled: true    # Phase 2: enable passive DHCP fingerprinting
