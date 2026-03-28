@@ -1,332 +1,245 @@
 # lan-fingerprinter
 
-A passive LAN device fingerprinter that identifies, tracks, and classifies devices on your local network using ARP observation and ICMP TTL analysis (with DHCP fingerprinting planned), without transmitting a single packet.
-
-The tool operates purely as a network observer, making it suitable for research, learning, and passive network monitoring.
+A passive LAN device fingerprinter that identifies, tracks, and classifies devices on your local network using ARP, ICMP TTL, DHCP, and DNS — without sending a single packet.
 
 ---
 
-# Features
+## Features
 
-## Phase 1 — Passive ARP Discovery
-
+### Phase 1 — Passive ARP Discovery
 - Sniffs ARP traffic on any interface (WiFi or Ethernet)
-- Extracts IP address, MAC address, and ARP operation type per device
-- Resolves MAC OUI prefix → vendor name via the IEEE database (auto-downloaded)
-- Persists discovered devices to SQLite with `first_seen` and `last_seen` timestamps
-- Displays a live terminal table powered by the Rich library with automatic refresh
+- Extracts IP address, MAC address per device
+- Resolves MAC OUI prefix → vendor name via IEEE database (auto-downloaded)
+- Persists all discovered devices to SQLite with `first_seen` / `last_seen` timestamps
+- Live terminal table powered by [Rich](https://github.com/Textualize/rich)
+
+### Phase 1.5 — ICMP TTL OS Fingerprinting
+- Passively captures ICMP echo replies (type 0)
+- Extracts TTL from IP header to infer OS family:
+
+  | TTL | OS Guess |
+  |-----|----------|
+  | 64  | Linux / Android / macOS |
+  | 128 | Windows |
+  | 255 | Router / Cisco / IoT |
+  | 50–70 | Likely Linux-like |
+  | 120–140 | Likely Windows-like |
+
+### Phase 2 — Passive DHCP Fingerprinting
+- Sniffs DHCP Discover/Request packets (UDP 68→67)
+- Extracts:
+  - **Option 12** — Hostname (e.g. `TECNO-SPARK-8C`, `Iphone-15-pro-max`)
+  - **Option 60** — Vendor Class Identifier (e.g. `MSFT 5.0`, `android-dhcp-13`)
+  - **Option 55** — Parameter Request List (fingerprint string)
+- Improves OS and device type classification significantly
+
+### Phase 3 — Passive DNS Tracking
+- Sniffs DNS queries (UDP port 53, QR=0 only)
+- Extracts queried domain name and query type per device
+- Uses domain patterns for OS inference:
+  - `gstatic.com`, `googleapis` → Android
+  - `captive.apple.com`, `icloud.com` → Apple (iOS/macOS)
+  - `microsoft.com`, `windowsupdate.com` → Windows
+- Shows **Last DNS** column in live table
+- Logs notable domain queries to `logs/events.log`
+
+### Phase 3.5 — MAC Seeding + Randomized MAC Detection
+- Detects locally administered (randomized) MAC addresses using IEEE bit standard
+- Shows `[rand] Randomized` instead of misleading `Unknown` for privacy MACs
+- Seeds device table from `/proc/net/arp` at startup — instant population with no traffic required
+
+### Phase 4 — New Device Alerts + Export *(current)*
+- **New device alert**: terminal bell + highlighted print when an unseen MAC appears
+- **Export to JSON**: `sudo python run.py --export devices.json`
+- **Export to CSV**: `sudo python run.py --export devices.csv`
+- All fields exported: IP, MAC, vendor, OS guess, TTL, hostname, DHCP fingerprint, DNS, timestamps
 
 ---
 
-## Phase 1.5 — ICMP TTL OS Fingerprinting
+## Project Structure
 
-Passively captures ICMP echo replies (type 0) from devices already communicating on the LAN.
-
-Extracts the TTL value from the IP header to infer an OS family.
-
-| TTL | OS Guess |
-|-----|----------|
-| 64 | Linux / Android / macOS |
-| 128 | Windows |
-| 255 | Router / Cisco / IoT |
-| 50–70 | Likely Linux-like |
-| 120–140 | Likely Windows-like |
-
-The system combines vendor + OS guess to infer device type classification such as:
-
-- Router
-- Mobile device
-- Laptop / workstation
-- Single-board computer
-- IoT device
-
-TTL values are stored in the database and the OS Guess and Device Type columns update live.
-
----
-
-# Project Structure
-
+```
 lan-fingerprinter/
 ├── README.md
 ├── requirements.txt
-├── run.py                  # Entry point (sets working directory and calls main)
-├── config.yaml             # Interface, database path, refresh interval
+├── run.py                  # Entry point — argument parsing, CWD setup
+├── config.yaml             # Interface, DB path, feature flags
 ├── data/
 │   ├── oui.csv             # IEEE OUI database (auto-downloaded, gitignored)
 │   └── devices.db          # SQLite device store (gitignored)
-├── logs/                   # Reserved for future logging (gitignored)
+├── logs/
+│   └── events.log          # New devices, DHCP events, notable DNS queries
 └── src/
     ├── __init__.py
-    ├── main.py             # Orchestration, live display, queue dispatch
-    ├── sniffer.py          # Scapy ARP + ICMP packet capture (background thread)
-    ├── oui.py              # OUI download + MAC → vendor lookup
-    ├── fingerprint.py      # TTL → OS guess, vendor + OS → device type
-    ├── database.py         # SQLite persistence layer (thread-safe)
+    ├── main.py             # Orchestration, queue dispatch, live display, export
+    ├── sniffer.py          # ARP + ICMP + DHCP + DNS capture (background thread)
+    ├── oui.py              # OUI download, vendor lookup, MAC utils, ARP seeding
+    ├── fingerprint.py      # OS resolution, device type inference (all signals)
+    ├── dhcp.py             # DHCP option parser
+    ├── dns.py              # DNS query parser + domain OS classification
+    ├── database.py         # SQLite persistence (thread-safe)
     └── models.py           # Device dataclass
+```
 
 ---
 
-# Installation
+## Installation
 
-## Requirements
+### Requirements
 
 - Python 3.10+
 - Linux (tested on Kali Linux Rolling 2025.1)
-- Root / sudo privileges (required for raw packet sniffing)
+- Root/sudo privileges (required for raw socket sniffing)
 
----
+### Setup
 
-## Setup
-
-Clone the repository:
-
-git clone https://github.com/yourname/lan-fingerprinter.git  
+```bash
+git clone https://github.com/yourname/lan-fingerprinter.git
 cd lan-fingerprinter
-
-Create a virtual environment:
-
 python -m venv venv
-
-Activate the environment:
-
 source venv/bin/activate
-
-Install dependencies:
-
 pip install -r requirements.txt
+```
+
+**`requirements.txt`:**
+```
+scapy
+rich
+pyyaml
+requests
+```
 
 ---
 
-## Dependencies (requirements.txt)
+## Configuration
 
-scapy  
-rich  
-pyyaml  
-requests  
+`config.yaml`:
 
-Scapy → packet sniffing and protocol parsing  
-Rich → terminal UI rendering  
-PyYAML → configuration parsing  
-Requests → OUI database download
+```yaml
+interface: wlan0       # Network interface (run: ip link)
+db_path: data/devices.db
+update_interval: 2     # Table refresh interval in seconds
+dhcp_enabled: true     # Enable passive DHCP fingerprinting
+dns_enabled: true      # Enable passive DNS query tracking
+```
 
----
-
-# Configuration
-
-Edit `config.yaml` before running:
-
-interface: wlan0  
-db_path: data/devices.db  
-update_interval: 2  
-
-Field descriptions:
-
-interface → network interface to sniff  
-db_path → SQLite database location  
-update_interval → terminal table refresh rate (seconds)
-
-To identify your interface:
-
+Find your interface:
+```bash
 ip link show
+```
 
 ---
 
-# Running
+## Running
 
+### Live mode
+```bash
 sudo python run.py
+```
 
-On the first execution the tool downloads the IEEE OUI vendor database (~6 MB) and stores it locally in:
+On first run, the OUI database (~6MB) is automatically downloaded and cached. The kernel ARP cache is read immediately for instant device population. New devices trigger a terminal bell and highlighted alert.
 
-data/oui.csv
-
-Subsequent runs reuse the cached file.
-
----
-
-# Optional Traffic Trigger
-
-Passive mode means devices appear only when they communicate.
-
-To accelerate discovery during testing you can generate traffic using:
-
+To trigger device traffic for testing:
+```bash
+# In a second terminal — not required for passive operation
 sudo nmap -sn 192.168.0.0/24
+```
 
-This generates ARP and ICMP traffic that the fingerprinter can observe.
+Press `Ctrl+C` to stop cleanly.
 
----
+### Export mode
 
-# Example Output
+Export after running the sniffer (devices are persisted to SQLite):
 
-              LAN Devices (Passive ARP Discovery)
+```bash
+# JSON export
+sudo python run.py --export devices.json
 
-┌───────────────┬───────────────────┬──────────────────┬────────────────────────────┬─────┬──────────────┬──────────┬──────────┐
-│ IP            │ MAC               │ Vendor           │ OS Guess                   │ TTL │ Type         │ First    │ Last     │
-├───────────────┼───────────────────┼──────────────────┼────────────────────────────┼─────┼──────────────┼──────────┼──────────┤
-│ 192.168.0.1   │ 04:95:e6:24:b0:a0 │ Tenda Technology │ Router / IoT / Cisco       │ 255 │ Router / AP  │ 12:01:03 │ 12:18:44 │
-│ 192.168.0.106 │ 9a:18:63:61:63:2d │ Unknown          │ Linux / Android / macOS    │ 64  │ Mobile       │ 12:01:05 │ 12:18:44 │
-│ 192.168.0.128 │ 78:45:61:ff:c1:db │ CyberTAN Tech    │ Linux / Android / macOS    │ 64  │ Router / AP  │ 12:01:07 │ 12:18:44 │
-│ 192.168.0.102 │ 00:28:f8:46:1d:fb │ Intel Corporate  │ Windows (TTL 128)          │ 128 │ Windows PC   │ 12:01:09 │ 12:18:44 │
-└───────────────┴───────────────────┴──────────────────┴────────────────────────────┴─────┴──────────────┴──────────┴──────────┘
+# CSV export
+sudo python run.py --export devices.csv
 
-Press Ctrl+C to exit cleanly.
+# Force format regardless of extension
+sudo python run.py --export output.txt --format json
+```
 
----
-
-# How It Works
-
-lan-fingerprinter operates entirely in passive observation mode.
-
-It analyzes packets already present on the network.
-
-Signal pipeline:
-
-Network Traffic  
-│  
-├── ARP packets → IP + MAC extraction  
-│        │  
-│        ▼  
-│   OUI lookup → Vendor  
-│        │  
-└── ICMP replies → TTL extraction → OS guess  
-         │  
-         ▼  
-   Device classification  
-         │  
-         ▼  
-   SQLite database (devices.db)  
-         │  
-         ▼  
-   Rich live terminal display
+Export fields: `ip`, `mac`, `vendor`, `os_guess`, `device_type`, `ttl`, `hostname`, `dhcp_fingerprint`, `vendor_class`, `last_dns_domain`, `last_dns_time`, `first_seen`, `last_seen`.
 
 ---
 
-# Why Passive Fingerprinting Matters
+## How It Works
 
-Active scanners generate traffic and may:
+lan-fingerprinter is **strictly passive** — it never sends packets.
 
-- Trigger intrusion detection systems
-- Violate network policy
-- Create unnecessary network load
+### Signal pipeline
 
-Passive monitoring observes only natural device communication, making it useful for:
+```
+Network traffic
+      │
+      ├── ARP          → IP + MAC + OUI vendor lookup
+      ├── ICMP reply   → TTL → OS family estimate
+      ├── DHCP req     → hostname, vendor class, param list
+      └── DNS query    → queried domain → platform inference
+                                │
+                         fingerprint.py
+                    (priority: DHCP > DNS > TTL)
+                                │
+                          devices.db (SQLite)
+                                │
+                    Rich live terminal table
+                    + logs/events.log
+                    + JSON/CSV export
+```
 
-- network research
-- security analysis
-- educational experiments
-- infrastructure monitoring
+### Why passive matters
 
----
-
-# Roadmap
-
-## Phase 2 — Passive DHCP Fingerprinting (Next)
-
-The tool will sniff DHCP Discover and Request packets when devices join the network.
-
-Fields to extract:
-
-Option 60 → Vendor Class Identifier  
-Option 12 → Hostname  
-Option 55 → Parameter Request List  
-
-These values enable more accurate OS detection using fingerprint datasets such as Fingerbank.
-
-Data will be stored per device in the database.
+Active scanners (nmap, arp-scan) inject packets — triggering IDS alerts and potentially violating network policies. Passive fingerprinting observes only what devices naturally broadcast.
 
 ---
 
-## Future Phases
+## Roadmap
 
-Phase 3 — Passive DNS tracking  
-Observe DNS queries (port 53) to identify device behaviors.
-
-Phase 4 — Classification engine  
-Score-based classification combining signals from:
-
-ARP  
-ICMP  
-DHCP  
-DNS  
-
-Phase 5 — New device alerts  
-Notify when an unknown MAC address appears.
-
-Phase 6 — Optional web interface  
-A read-only LAN dashboard built using Flask or FastAPI.
+- **Phase 5** — Classification confidence scoring (weight per signal, show confidence %)
+- **Phase 6** — MAC spoofing detection (same IP, different MAC within short window)
+- **Phase 7** — Local read-only web UI (Flask, 127.0.0.1 only)
+- **Future** — TLS SNI extraction (passive domain tracking even with DoH)
+- **Future** — Fingerbank DHCP param list lookup
 
 ---
 
-# Development Guidelines
+## Development Guidelines
 
-Branch strategy:
+### Branching
+```
+main              ← stable only
+feature/phase-X   ← one branch per phase
+fix/description   ← targeted bug fixes
+```
 
-main  
-feature/phase-X  
-fix/description  
+### Commit format
+```
+feat(scope): short description
+fix(scope): short description
+docs(readme): update for phase X
+```
 
----
-
-Commit message format:
-
-type(scope): description
-
-Examples:
-
-feat(sniffer): add passive ICMP TTL extraction  
-fix(oui): handle HTML response from maclookup.app  
-refactor(database): replace INSERT OR REPLACE with proper upsert  
-docs(readme): update roadmap with Phase 2 DHCP plan  
+### Core rule
+**Keep it passive.** No packet injection. No ARP requests. No pings. Observer only.
 
 ---
 
-# Core Principle
+## Legal & Security Notice
 
-Keep the system passive.
+For use **only on networks you own or have explicit permission to monitor**.
 
-The tool must:
-
-- never inject packets
-- never send ARP requests
-- never ping devices
-
-It should remain a pure network observer.
-
-Active scanning features should exist only in a separate mode if ever implemented.
+- **Kenya**: Subject to the [Kenya Data Protection Act, 2019](https://www.odpc.go.ke/dpa/) and the [Computer Misuse and Cybercrimes Act, 2018](https://www.ict.go.ke/computer-misuse-and-cybercrimes-act-2018/).
+- All captured data stays on the local machine in `data/devices.db`. Nothing is transmitted externally.
 
 ---
 
-# Code Guidelines
+## License
 
-- Each module has a single responsibility
-- Sniffer thread communicates via Queue only
-- Database layer uses thread locks
-- Public functions use type hints
-- Complex logic is documented with inline comments
+MIT — see [LICENSE](LICENSE).
 
 ---
 
-# Legal & Security Notice
-
-This tool is intended for educational and research purposes on networks you own or are authorized to monitor.
-
-In Kenya, use is subject to:
-
-Kenya Data Protection Act (2019)  
-Computer Misuse and Cybercrimes Act (2018)
-
-Unauthorized monitoring of networks may be illegal.
-
-Users are responsible for ensuring they have permission before deploying this tool.
-
-The application does not transmit data externally.  
-All data is stored locally in `data/devices.db`.
-
----
-
-# License
-
-MIT License — see LICENSE.
-
----
-
-Built with Python · Scapy · Rich · SQLite · Kali Linux
+*Built on Kali Linux · Python · Scapy · Rich · SQLite*
